@@ -1,0 +1,54 @@
+# End-to-end test stack: the real image, staging settings, real Postgres,
+# Redis, the Celery worker running the schedule (hold expiry), and a webhook
+# receiver standing in for a platform. Run it with:
+#
+#     .venv/Scripts/python e2e/run.py          (Windows; .venv/bin/python elsewhere)
+#
+# Own project name and ports, so it runs beside other local stacks.
+name: booking-e2e
+
+x-env: &env
+  DJANGO_SETTINGS_MODULE: config.settings.staging
+  SECRET_KEY: e2e-only-secret-key-0123456789-abcdefghijklmnopqrstuvwxyz
+  DATABASE_URL: postgres://booking:booking@db:5432/booking
+  ALLOWED_HOSTS: localhost,127.0.0.1,web
+  ADMIN_URL: back-office-e2e/
+  BOOKING_SECRET_KEYS: MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE=
+  REDIS_URL: redis://redis:6379/0
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: booking, POSTGRES_PASSWORD: booking, POSTGRES_DB: booking}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booking"]
+      interval: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+
+  web:
+    build: ..
+    environment: *env
+    ports: ["8120:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+
+  worker:
+    build: ..
+    command: ["./start-worker.sh"]
+    environment:
+      <<: *env
+      CELERY_BEAT: "1"
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_started}
+      web: {condition: service_started}
+
+  # Stands in for a platform's webhook endpoint (same image: it has Python).
+  hook:
+    build: ..
+    command: ["python", "e2e/hook.py"]
+    ports: ["9022:9000"]
