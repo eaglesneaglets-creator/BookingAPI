@@ -83,3 +83,39 @@ def test_search_window_is_capped(api):
     r = api.post('/v1/availability/', {'requirements': [{'resources': ['room-a']}], 'start': '2030-01-01',
                                        'end': '2030-06-01', 'duration_minutes': 60})
     assert r.status_code == 400
+
+
+def test_maintenance_closure_on_one_resource_only(api):
+    """ONA's maintenance block on one room: overlaps freely, closes only that room, says which kind."""
+    add_resource(api, 'room-a')
+    add_resource(api, 'room-b')
+    b = hold(api, [['room-a']], day(3, 10), day(3, 11)).data
+    r = api.put('/v1/closures/ref/block-1/', {'start': iso(day(3, 10)), 'end': iso(day(3, 13)),
+                                               'resources': ['room-a'], 'kind': 'maintenance', 'reason': 'Desk'})
+    assert r.status_code == 201, r.data
+    assert r.data['affected_bookings'] == [{'id': b['id'], 'external_ref': ''}]  # reported, not cancelled
+    # A second, overlapping closure is fine (unlike blocks).
+    assert api.put('/v1/closures/ref/block-2/', {'start': iso(day(3, 12)), 'end': iso(day(3, 14)),
+                                                  'resources': ['room-a'], 'kind': 'maintenance'}).status_code == 201
+    slots = search(api, [['room-a']], iso(day(3, 11)), iso(day(3, 12)), duration_minutes=60,
+                   include_unavailable=True)
+    assert (slots[0]['reason'], slots[0]['closure_kind']) == ('closed', 'maintenance')
+    assert search(api, [['room-b']], iso(day(3, 11)), iso(day(3, 12)), duration_minutes=60)[0]['available']
+    assert hold(api, [['room-b']], day(3, 11), day(3, 12)).status_code == 201
+    # PUT again replaces it; DELETE removes it; both are safe to repeat.
+    r = api.put('/v1/closures/ref/block-1/', {'start': iso(day(3, 20)), 'end': iso(day(3, 21)),
+                                               'resources': ['room-a'], 'kind': 'maintenance'})
+    assert r.status_code == 200 and r.data['start'].startswith(iso(day(3, 20))[:16])
+    assert api.delete('/v1/closures/ref/block-1/').status_code == 204
+    assert api.delete('/v1/closures/ref/block-1/').status_code == 204
+    assert [c['external_ref'] for c in api.get('/v1/closures/').data['results']] == ['block-2']
+
+
+def test_holiday_wins_over_maintenance(api):
+    add_resource(api, 'room-a')
+    api.put('/v1/closures/ref/m/', {'start': iso(day(3)), 'end': iso(day(4)), 'resources': ['room-a'],
+                                    'kind': 'maintenance'})
+    api.put('/v1/closures/ref/h/', {'start': iso(day(3)), 'end': iso(day(4)), 'kind': 'holiday'})
+    slots = search(api, [['room-a']], iso(day(3, 9)), iso(day(3, 10)), duration_minutes=60,
+                   include_unavailable=True)
+    assert slots[0]['closure_kind'] == 'holiday'

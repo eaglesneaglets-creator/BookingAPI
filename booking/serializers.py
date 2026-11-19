@@ -225,7 +225,8 @@ class BookingCreateSerializer(TimesMixin, serializers.Serializer):
     external_ref = serializers.CharField(max_length=120, required=False, default='', allow_blank=True)
     metadata = serializers.JSONField(required=False, default=dict)
     override_rules = serializers.BooleanField(
-        default=False, help_text='Staff bookings: ignore opening hours, notice and closures (never overlaps).')
+        default=False, help_text='Staff bookings: ignore opening hours, notice, closures and inactive resources '
+                                 '(never overlaps).')
 
     def validate_hold_minutes(self, value):
         if value > settings.HOLD_MAX_MINUTES:
@@ -310,8 +311,13 @@ class BlockSerializer(serializers.ModelSerializer):
 class ClosureCreateSerializer(serializers.Serializer):
     start = AwareDateTimeField()
     end = AwareDateTimeField()
-    kinds = serializers.ListField(child=serializers.SlugField(max_length=40), required=False, default=list)
+    kinds = serializers.ListField(child=serializers.SlugField(max_length=40), required=False, default=list,
+                                 help_text='Only these kinds of resource. Empty: every kind.')
+    resources = serializers.ListField(child=serializers.CharField(max_length=120), required=False, default=list,
+                                      max_length=200, help_text='Only these resources (your refs). Empty: all.')
+    kind = serializers.SlugField(max_length=40, default='closure', help_text='"holiday", "maintenance"…')
     reason = serializers.CharField(max_length=200, required=False, default='', allow_blank=True)
+    external_ref = serializers.CharField(max_length=120, required=False, default='', allow_blank=True)
 
     def validate(self, attrs):
         if attrs['end'] <= attrs['start']:
@@ -322,10 +328,14 @@ class ClosureCreateSerializer(serializers.Serializer):
 class ClosureSerializer(serializers.ModelSerializer):
     start = serializers.SerializerMethodField()
     end = serializers.SerializerMethodField()
+    resources = serializers.SerializerMethodField()
 
     class Meta:
         model = Closure
-        fields = ['id', 'start', 'end', 'kinds', 'reason', 'created_at']
+        fields = ['id', 'external_ref', 'kind', 'start', 'end', 'kinds', 'resources', 'reason', 'created_at']
+
+    def get_resources(self, c) -> list[str]:
+        return sorted(r.external_ref for r in c.resources.all())
 
     def get_start(self, c) -> str:
         return c.period.lower.isoformat()

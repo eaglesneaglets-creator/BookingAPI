@@ -18,4 +18,5 @@ urlpatterns = [
     path('blocks/<uuid:pk>/', views.BlockDetail.as_view()),
     path('closures/', views.ClosureList.as_view()),
     path('closures/<uuid:pk>/', views.ClosureDetail.as_view()),
+    path('closures/ref/<str:ref>/', views.ClosureByRef.as_view()),
 ]

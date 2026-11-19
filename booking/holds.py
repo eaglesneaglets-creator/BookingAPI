@@ -172,7 +172,9 @@ def _allocate(platform, booking, requirements, start, end, now, override_rules) 
         for r in order:
             if chosen == req.required:
                 break
-            if not r.is_active:
+            # Staff (override_rules) may still book a resource taken off sale:
+            # bookings made before it was switched off stay valid on the platform.
+            if not r.is_active and not override_rules:
                 reasons[r.external_ref] = 'inactive'
                 continue
             if not override_rules:

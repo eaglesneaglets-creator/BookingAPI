@@ -6,7 +6,7 @@ platform's key can only ever see and change that platform's rows.
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import availability, holds, idempotency
+from .errors import Conflict
 from .models import Allocation, Block, Booking, BookingStatus, Closure, DateOverride, Resource, WeeklyHours
 from .serializers import (
     AvailabilitySerializer,
@@ -322,33 +323,72 @@ class BlockDetail(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def save_closure(platform, data, closure: Closure | None = None) -> dict:
+    """Create or replace a closure; the answer lists live bookings inside it (not cancelled)."""
+    refs = list(dict.fromkeys(data['resources']))
+    found = {r.external_ref: r for r in Resource.objects.filter(platform=platform, external_ref__in=refs)}
+    if unknown := [ref for ref in refs if ref not in found]:
+        raise serializers.ValidationError({'resources': f'Unknown resources {unknown}.'})
+    fields = {'period': holds.period(data['start'], data['end']), 'kinds': data['kinds'], 'kind': data['kind'],
+              'reason': data['reason'], 'external_ref': data['external_ref']}
+    with transaction.atomic():
+        if closure is None:
+            closure = Closure.objects.create(platform=platform, **fields)
+        else:
+            for k, v in fields.items():
+                setattr(closure, k, v)
+            closure.save()
+        closure.resources.set(found.values())
+    affected = Booking.objects.filter(
+        platform=platform, status__in=[BookingStatus.HELD, BookingStatus.CONFIRMED],
+        allocations__active=True, start_at__lt=data['end'], end_at__gt=data['start'])
+    if data['kinds']:
+        affected = affected.filter(allocations__resource__kind__in=data['kinds'])
+    if refs:
+        affected = affected.filter(allocations__resource__in=found.values())
+    out = ClosureSerializer(closure).data
+    out['affected_bookings'] = [{'id': str(b.id), 'external_ref': b.external_ref} for b in affected.distinct()]
+    return out
+
+
 class ClosureList(APIView):
     @extend_schema(responses=ClosureSerializer(many=True))
     def get(self, request):
-        qs = Closure.objects.filter(platform=platform_of(request))
+        qs = Closure.objects.filter(platform=platform_of(request)).prefetch_related('resources')
         page = PageNumberPagination()
         return page.get_paginated_response(ClosureSerializer(page.paginate_queryset(qs, request, self),
                                                              many=True).data)
 
     @extend_schema(request=ClosureCreateSerializer, responses={201: ClosureSerializer},
-                   description='Shut the platform (or some kinds of resource) for a period. Existing bookings '
-                               'are not cancelled; the ones inside it are listed as `affected_bookings`.')
+                   description='Take time off the calendar: the whole platform (a holiday), some kinds, or some '
+                               'resources (maintenance). Closures may overlap anything; existing bookings '
+                               'are not cancelled, the ones inside it are listed as `affected_bookings`.')
     def post(self, request):
-        platform = platform_of(request)
         s = ClosureCreateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
-        d = s.validated_data
-        c = Closure.objects.create(platform=platform, period=holds.period(d['start'], d['end']), kinds=d['kinds'],
-                                   reason=d['reason'])
-        affected = Booking.objects.filter(
-            platform=platform, status__in=[BookingStatus.HELD, BookingStatus.CONFIRMED],
-            allocations__active=True, start_at__lt=d['end'], end_at__gt=d['start'])
-        if d['kinds']:
-            affected = affected.filter(allocations__resource__kind__in=d['kinds'])
-        data = ClosureSerializer(c).data
-        data['affected_bookings'] = [{'id': str(b.id), 'external_ref': b.external_ref}
-                                     for b in affected.distinct()]
-        return Response(data, status=status.HTTP_201_CREATED)
+        try:
+            return Response(save_closure(platform_of(request), s.validated_data), status=status.HTTP_201_CREATED)
+        except IntegrityError as exc:
+            raise Conflict('A closure with this external_ref already exists.', 'duplicate_external_ref') from exc
+
+
+class ClosureByRef(APIView):
+    """Your own id for a closure: PUT creates or replaces it, DELETE removes it. Safe to repeat."""
+
+    @extend_schema(request=ClosureCreateSerializer, responses=ClosureSerializer)
+    def put(self, request, ref):
+        platform = platform_of(request)
+        s = ClosureCreateSerializer(data={**request.data, 'external_ref': ref})
+        s.is_valid(raise_exception=True)
+        with transaction.atomic():
+            existing = Closure.objects.select_for_update().filter(platform=platform, external_ref=ref).first()
+            data = save_closure(platform, s.validated_data, existing)
+        return Response(data, status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED)
+
+    @extend_schema(responses={204: None})
+    def delete(self, request, ref):
+        Closure.objects.filter(platform=platform_of(request), external_ref=ref).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ClosureDetail(APIView):

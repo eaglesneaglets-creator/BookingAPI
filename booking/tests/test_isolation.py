@@ -67,3 +67,15 @@ def test_keys(api, ona, db):
     key.revoked_at = timezone.now()
     key.save()
     assert c.get('/v1/bookings/').status_code == 401
+
+
+def test_closures_by_ref_are_per_platform(api, eagles_api):
+    add_resource(api, 'room-a')
+    add_resource(eagles_api, 'room-a')
+    body = {'start': '2030-01-01T00:00:00Z', 'end': '2030-01-02T00:00:00Z', 'kind': 'holiday'}
+    assert api.put('/v1/closures/ref/x/', body).status_code == 201
+    assert eagles_api.put('/v1/closures/ref/x/', body).status_code == 201   # its own "x"
+    assert eagles_api.delete('/v1/closures/ref/x/').status_code == 204
+    assert api.get('/v1/closures/').data['count'] == 1                       # ONA's survives
+    r = eagles_api.put('/v1/closures/ref/y/', {**body, 'resources': ['ona-only']})
+    assert r.status_code == 400

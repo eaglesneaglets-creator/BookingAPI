@@ -12,7 +12,7 @@ When a slot is not available, `reason` is the first that applies, in order:
 
     too_soon       inside the resource's minimum notice
     too_far        beyond how far ahead the resource can be booked
-    closed         a platform closure (holiday) covers it
+    closed         a closure covers it (`closure_kind` says which: "holiday", "maintenance"…)
     blocked        maintenance / time off on the resource
     booked         another booking (or an unexpired hold) has it
     outside_hours  the resource is not open then
@@ -82,7 +82,7 @@ def open_intervals(resource: Resource, start: datetime, end: datetime, weekly=No
 class Timeline:
     resource: Resource
     open: list = field(default_factory=list)       # [(a, b)] merged, disjoint
-    closures: list = field(default_factory=list)   # [(a, b)]
+    closures: list = field(default_factory=list)   # [(a, b, kind)]
     busy: list = field(default_factory=list)       # [(a, b, 'booked'|'blocked')] sorted, disjoint
     _open_starts: list = field(default_factory=list)
     _busy_starts: list = field(default_factory=list)
@@ -98,12 +98,19 @@ class Timeline:
             return 'too_soon'
         if start > now + timedelta(days=r.max_advance_days):
             return 'too_far'
-        if any(a < end and b > start for a, b in self.closures):
+        if self.closure_kind(start, end):
             return 'closed'
         i = bisect_right(self._open_starts, start) - 1
         if i < 0 or self.open[i][1] < end:
             return 'outside_hours'
         return None
+
+    def closure_kind(self, start: datetime, end: datetime) -> str | None:
+        """The kind of the first closure over [start, end) ("holiday" before anything else), or None."""
+        kinds = [k for a, b, k in self.closures if a < end and b > start]
+        if not kinds:
+            return None
+        return 'holiday' if 'holiday' in kinds else kinds[0]
 
     def busy_reason(self, start: datetime, end: datetime) -> str | None:
         """'blocked' / 'booked' if the period (with this resource's buffers) meets another allocation."""
@@ -139,7 +146,8 @@ def build_timelines(platform, resources, start: datetime, end: datetime, now: da
     full = {r.id: r for r in Resource.objects.filter(platform=platform, id__in=ids)
             .prefetch_related('weekly_hours', 'overrides')}
 
-    closures = list(Closure.objects.filter(platform=platform, period__overlap=window))
+    closures = [(c, {r.id for r in c.resources.all()}) for c in
+                Closure.objects.filter(platform=platform, period__overlap=window).prefetch_related('resources')]
     busy = defaultdict(list)
     if include_busy:
         # An overdue hold no longer counts: whoever holds next expires it.
@@ -157,7 +165,7 @@ def build_timelines(platform, resources, start: datetime, end: datetime, now: da
         out[rid] = Timeline(
             resource=r,
             open=open_intervals(r, start, end, r.weekly_hours.all(), r.overrides.all()),
-            closures=[(c.period.lower, c.period.upper) for c in closures if not c.kinds or r.kind in c.kinds],
+            closures=[(c.period.lower, c.period.upper, c.kind) for c, ids in closures if c.applies_to(r, ids)],
             busy=sorted(busy[rid]),
         )
     return out
@@ -188,18 +196,22 @@ def search(platform, requirements, start: datetime, end: datetime, *, duration_m
     slots = []
     for t in slot_starts(start, end, duration, step_minutes, tz):
         t_end = t + duration
-        free, reason = [], None
+        free, reason, closure = [], None, None
         for req in requirements:
-            states = {r.external_ref: timelines[r.id].state(t, t_end, now) for r in req.resources}
-            ok = [ref for ref, s in states.items() if s is None]
+            states = {r: timelines[r.id].state(t, t_end, now) for r in req.resources}
+            ok = [r.external_ref for r, s in states.items() if s is None]
             free.append(ok)
             if len(ok) < req.required and reason is None:
                 found = [s for s in states.values() if s is not None]
                 reason = min(found, key=REASONS.index) if found else 'booked'
+                if reason == 'closed':
+                    closure = next(timelines[r.id].closure_kind(t, t_end) for r, s in states.items() if s == 'closed')
         if reason is None or include_unavailable:
             slot = {'start': t.astimezone(tz).isoformat(), 'end': t_end.astimezone(tz).isoformat(),
                     'available': reason is None, 'free': free}
             if reason:
                 slot['reason'] = reason
+            if closure:
+                slot['closure_kind'] = closure
             slots.append(slot)
     return slots

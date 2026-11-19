@@ -57,7 +57,8 @@ order you sent, so work is spread evenly across engineers or mentors.
 | `GET /v1/bookings/?resource=&status=&from=&to=&external_ref=&subject_ref=` | Your bookings |
 | `POST /v1/bookings/{id}/confirm/` · `extend/` · `cancel/` · `reschedule/` | Lifecycle |
 | `GET/POST /v1/blocks/` · `DELETE /v1/blocks/{id}/` | Maintenance / time off on one resource |
-| `GET/POST /v1/closures/` · `DELETE /v1/closures/{id}/` | Holidays: the whole platform, or some kinds |
+| `GET/POST /v1/closures/` · `DELETE /v1/closures/{id}/` | Time off the calendar without taking it: a holiday for the whole platform, or maintenance on some `kinds` or `resources`. May overlap anything; bookings inside are listed, not cancelled |
+| `PUT/DELETE /v1/closures/ref/{your-id}/` | The same, keyed by your own id: create-or-replace and remove, safe to repeat (how ONA mirrors its calendar blocks) |
 
 Errors carry a stable `code`: `slot_unavailable` (with which group failed and
 why, per resource: `booked`, `blocked`, `closed`, `outside_hours`,

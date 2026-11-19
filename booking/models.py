@@ -161,18 +161,36 @@ class DateOverride(models.Model):
 
 
 class Closure(models.Model):
-    """The platform shut for a period (a public holiday): every resource, or only some kinds."""
+    """
+    Time taken off the calendar without taking anything: a public holiday for
+    the whole platform, or maintenance on some resources. Unlike a Block it
+    does not take part in the no-double-booking constraint, so closures may
+    overlap each other and existing bookings (which are reported, not
+    cancelled). It applies to `resources` if any are named, else to every
+    resource; and only to `kinds` if any are named.
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     platform = models.ForeignKey(Platform, on_delete=models.CASCADE, related_name='closures')
     period = DateTimeRangeField()
     kinds = ArrayField(models.SlugField(max_length=40), default=list, blank=True,
                        help_text='Empty: every kind of resource.')
+    resources = models.ManyToManyField(Resource, blank=True, related_name='closures',
+                                       help_text='Empty: every resource (of `kinds`).')
+    kind = models.SlugField(max_length=40, default='closure', help_text='"holiday", "maintenance"…')
     reason = models.CharField(max_length=200, blank=True)
+    external_ref = models.CharField(max_length=120, blank=True, help_text="The platform's id for it.")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['period']
+        constraints = [
+            models.UniqueConstraint(fields=['platform', 'external_ref'], condition=~models.Q(external_ref=''),
+                                    name='closure_ref_unique_per_platform'),
+        ]
+
+    def applies_to(self, resource: 'Resource', resource_ids: set) -> bool:
+        return (not self.kinds or resource.kind in self.kinds) and (not resource_ids or resource.id in resource_ids)
 
 
 # ---------------------------------------------------------------------------

@@ -100,6 +100,15 @@ def test_rules_opening_hours_notice_and_closures(api):
     assert hold(api, [['mentor']], day(3, 18), day(3, 19), override_rules=True).status_code == 409
 
 
+def test_inactive_resources_only_for_staff(api):
+    add_resource(api, 'old-room', is_active=False)
+    r = hold(api, [['old-room']], day(3, 10), day(3, 11))
+    assert r.data['details']['reasons'] == {'old-room': 'inactive'}
+    # A platform mirroring bookings made before the room was switched off.
+    assert hold(api, [['old-room']], day(3, 10), day(3, 11), override_rules=True).status_code == 201
+    assert hold(api, [['old-room']], day(3, 10), day(3, 11), override_rules=True).status_code == 409
+
+
 def test_overnight_session_across_midnight(api):
     add_resource(api, 'room-a')
     assert hold(api, [['room-a']], day(3, 22), day(4, 2)).status_code == 201
